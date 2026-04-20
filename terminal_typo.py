@@ -20,7 +20,6 @@ CHARSETS = {
     "binary": list(" 01"),
     "hex": list(" 0123456789ABCDEF"),
     "braille": list(" ⡀⡄⡆⡇⣇⣧⣷⣿"),
-
     "math": list(" -+<>=%&8B@"),
     "slashes": list(" \\/|X"),
     "waves": list(" .~≈=")
@@ -89,6 +88,9 @@ DIM = "\033[2m"
 
 # Maximum number of glyphs to sample from a charset for rendering
 MAX_GLYPH_SAMPLES = 16
+
+# Small epsilon to prevent division by zero in animation phase calculations
+EPSILON = 0.001
 
 bayer_matrix = np.array([[0, 2], [3, 1]]) / 4.0
 
@@ -576,7 +578,7 @@ def get_ethereal_alphas(text, t, speed):
         if t_norm < 0.35:
             # Fade-in phase
             local_t = t_norm / 0.35
-            char_progress = max(0.0, min(1.0, (local_t - char_delay) / (1.0 - char_delay + 0.001)))
+            char_progress = max(0.0, min(1.0, (local_t - char_delay) / (1.0 - char_delay + EPSILON)))
             alpha = char_progress
         elif t_norm < 0.65:
             # Hold phase — fully visible
@@ -584,7 +586,7 @@ def get_ethereal_alphas(text, t, speed):
         else:
             # Fade-out phase
             local_t = (t_norm - 0.65) / 0.35
-            char_progress = max(0.0, min(1.0, (local_t - char_delay) / (1.0 - char_delay + 0.001)))
+            char_progress = max(0.0, min(1.0, (local_t - char_delay) / (1.0 - char_delay + EPSILON)))
             alpha = 1.0 - char_progress
 
         alphas.append(max(0.0, min(1.0, alpha)))

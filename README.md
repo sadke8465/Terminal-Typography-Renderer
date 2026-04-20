@@ -24,7 +24,7 @@ A high-fidelity ASCII art text renderer with an interactive TUI for real-time pa
 | **PULSE** | Ease-In-Out Cubic | Smooth breathing scale animation |
 | **TYPEWRITER** | CSS Ease / Expo Out | Progressive character reveal with cursor |
 | **TYPO_WAVE** | Phase-Shifted √Sine | Per-letter Y-axis bounce with weightless hang |
-| **ETHEREAL** | Linear Sequential | Per-letter dither-fade dissolve sequence |
+| **ETHEREAL** | Linear Sequential | Per-letter alpha-fade dissolve sequence |
 | **STATIC** | None | No animation |
 
 ## Installation
