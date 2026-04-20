@@ -94,7 +94,7 @@ bayer_matrix = np.array([[0, 2], [3, 1]]) / 4.0
 
 # --- INPUT HANDLING ---
 def get_key():
-    """Read a keypress, properly handling multi-byte ANSI escape sequences."""
+    """Read a key press, properly handling multi-byte ANSI escape sequences."""
     if os.name == 'nt':
         import msvcrt
         if msvcrt.kbhit():
@@ -123,6 +123,8 @@ def get_key():
                     seq = ''
                     while select.select([sys.stdin], [], [], 0.01)[0]:
                         seq += sys.stdin.read(1)
+                        # Safety limit: longest expected sequence is 4 bytes
+                        # (e.g. "[5~" for PGUP), 8 covers any extended sequences.
                         if len(seq) >= 8:
                             break
                     mapping = {
@@ -268,7 +270,11 @@ def get_typewriter_text(text, t, speed):
 
 
 # --- MASK GENERATION (Pillow-based Point-to-Grid Engine) ---
-# Vertical compensation factor: terminal chars are ~2x taller than wide.
+# Vertical compensation factor: terminal character cells are typically ~2x taller
+# than they are wide (e.g. a cell might be 8px wide × 16px tall). This factor
+# compresses the rendering canvas vertically before stretching it back to the full
+# terminal height, producing correctly proportioned text. Adjust if your terminal
+# uses a non-standard cell aspect ratio.
 ASPECT_RATIO_FACTOR = 0.5
 
 
@@ -321,7 +327,9 @@ def create_text_mask(text, target_w, target_h, font_path, font_size, thickness, 
     text_y = int((effective_h - text_h) / 2 - bbox[1])
 
     if is_stroke:
-        # Draw stroke effect: thick outline, then erase interior
+        # Draw stroke effect: thick outline, then erase interior.
+        # Factor 0.4 maps the TUI "Boldness" parameter to a visually balanced
+        # PIL stroke_width (keeps strokes visible but not overly thick).
         stroke_width = max(1, int(thickness * 0.4))
         draw.text((text_x, text_y), text, font=pil_font, fill=255,
                   stroke_width=stroke_width, stroke_fill=255)
