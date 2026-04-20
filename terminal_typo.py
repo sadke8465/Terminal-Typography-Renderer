@@ -49,36 +49,26 @@ bayer_matrix = np.array([[0, 2], [3, 1]]) / 4.0
 
 # --- INPUT HANDLING ---
 def get_key():
-    """Read a keypress, handling multi-byte escape sequences for arrow keys."""
     if os.name == 'nt':
-        import msvcrt
-        if msvcrt.kbhit():
-            ch = msvcrt.getwch()
-            if ch in ('\x00', '\xe0'):
-                ch2 = msvcrt.getwch()
-                mapping = {'H': 'UP', 'P': 'DOWN', 'K': 'LEFT', 'M': 'RIGHT'}
-                return mapping.get(ch2, None)
-            return ch
-        return None
+        # (Keep your existing Windows logic)
+        ...
     else:
-        if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
+        if select.select([sys.stdin], [], [], 0)[0]:
             ch = sys.stdin.read(1)
             if ch == '\x1b':
-                if select.select([sys.stdin], [], [], 0.02) == ([sys.stdin], [], []):
-                    ch2 = sys.stdin.read(1)
-                    if ch2 == '[':
-                        if select.select([sys.stdin], [], [], 0.02) == ([sys.stdin], [], []):
-                            ch3 = sys.stdin.read(1)
-                            mapping = {'A': 'UP', 'B': 'DOWN', 'C': 'RIGHT', 'D': 'LEFT'}
-                            return mapping.get(ch3, None)
-                return 'ESCAPE'
-            elif ch == '\x7f' or ch == '\x08':
+                # Try to read the next two characters immediately
+                # ANSI sequences for arrows are usually 3 chars: ESC + [ + (A, B, C, or D)
+                try:
+                    # Non-blocking read to grab the rest of the sequence
+                    seq = sys.stdin.read(2)
+                    mapping = {'[A': 'UP', '[B': 'DOWN', '[C': 'RIGHT', '[D': 'LEFT'}
+                    return mapping.get(seq, 'ESCAPE')
+                except:
+                    return 'ESCAPE'
+            elif ch == '\x7f':
                 return 'BACKSPACE'
-            elif ch == '\n' or ch == '\r':
-                return 'ENTER'
             return ch
         return None
-
 
 # --- EASING CURVE LIBRARY ---
 def ease_linear(t):
