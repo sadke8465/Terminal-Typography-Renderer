@@ -42,6 +42,9 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"
 
+# Maximum number of glyphs to sample from a charset for rendering
+MAX_GLYPH_SAMPLES = 16
+
 bayer_matrix = np.array([[0, 2], [3, 1]]) / 4.0
 
 # --- INPUT HANDLING ---
@@ -313,7 +316,10 @@ class Parameter:
         else:
             # Gauge rendering
             gauge_width = 10
-            normalized = (self.value - self.min_val) / (self.max_val - self.min_val) if self.max_val != self.min_val else 0
+            if self.max_val == self.min_val:
+                normalized = 1.0 if self.value >= self.min_val else 0.0
+            else:
+                normalized = (self.value - self.min_val) / (self.max_val - self.min_val)
             filled = int(normalized * gauge_width)
             gauge = "█" * filled + "░" * (gauge_width - filled)
             val_display = self.fmt.format(self.value)
@@ -353,17 +359,19 @@ def render_tui_panel(params, selected_idx, current_text, text_editing, panel_wid
 
     lines.append(f"{RESET}{top_border}")
 
-    # Text field
-    if text_editing:
-        text_display = f"{BOLD}  TEXT: {current_text}█{RESET}"
+    # Text field — compute visible length without ANSI codes for correct padding
+    cursor_char = "█" if text_editing else ""
+    max_text_len = panel_width - 9  # "  TEXT: " is 8 chars + cursor
+    if len(current_text) > max_text_len:
+        display_text = current_text[:max_text_len - 3] + "..."
     else:
-        display = current_text if len(current_text) <= panel_width - 10 else current_text[:panel_width - 13] + "..."
-        text_display = f"  TEXT: {display}"
-    # Pad text line
-    # We need to handle ANSI codes in length calculation
-    raw_text = f"  TEXT: {current_text}" + ("█" if text_editing else "")
-    padding = panel_width - min(len(raw_text), panel_width)
-    lines.append(f"│{text_display}{' ' * padding}│" if not text_editing else f"│{text_display}{' ' * max(0, panel_width - len(raw_text) - 1)}│")
+        display_text = current_text
+    raw_content = f"  TEXT: {display_text}{cursor_char}"
+    padding = max(0, panel_width - len(raw_content))
+    if text_editing:
+        lines.append(f"│{BOLD}{raw_content}{RESET}{' ' * padding}│")
+    else:
+        lines.append(f"│{raw_content}{' ' * padding}│")
 
     lines.append(f"{mid_border}")
 
@@ -409,7 +417,7 @@ def render_frame_to_string(frame, width, height, active_chars, brightness, contr
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("text", nargs="?", default="Hello")
+    parser.add_argument("text", nargs="?", default="Hello", help="Initial display text (editable live via TUI)")
     parser.add_argument("-w", "--width", type=int, default=80)
     parser.add_argument("-H", "--height", type=int, default=30)
     parser.add_argument("-s", "--speed", type=float, default=1.0)
@@ -469,7 +477,7 @@ def main():
 
             # Build active charset
             base_chars = CHARSETS[glyph_names[glyph_idx]]
-            active_chars = np.array(base_chars)[np.linspace(0, len(base_chars) - 1, min(16, len(base_chars))).astype(int)]
+            active_chars = np.array(base_chars)[np.linspace(0, len(base_chars) - 1, min(MAX_GLYPH_SAMPLES, len(base_chars))).astype(int)]
 
             # Render ASCII art
             ascii_output = render_frame_to_string(frame, args.width, args.height, active_chars, brightness, contrast, num_colors)
