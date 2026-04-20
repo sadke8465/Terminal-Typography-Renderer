@@ -314,7 +314,7 @@ def _load_pil_font(font_path, size):
         return ImageFont.load_default()
 
 
-def create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_offset=0, rotation=0.0):
+def create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_offset=0, rotation=0.0, aspect_ratio=None):
     """
     Render text directly at terminal resolution (1:1 pixel-to-character mapping).
     Applies aspect ratio correction so text isn't vertically squashed.
@@ -327,7 +327,8 @@ def create_text_mask(text, target_w, target_h, font_path, font_size, thickness, 
 
     # Apply aspect ratio correction: the effective pixel height for rendering
     # is reduced because terminal cells are taller than wide.
-    effective_h = int(h * ASPECT_RATIO_FACTOR)
+    ar_factor = aspect_ratio if aspect_ratio is not None else ASPECT_RATIO_FACTOR
+    effective_h = int(h * ar_factor)
     if effective_h < 1:
         effective_h = 1
 
@@ -372,7 +373,7 @@ def create_text_mask(text, target_w, target_h, font_path, font_size, thickness, 
 
 
 def create_per_letter_masks(text, target_w, target_h, font_path, font_size, thickness, is_stroke,
-                            y_offsets=None, alphas=None):
+                            y_offsets=None, alphas=None, aspect_ratio=None):
     """
     Per-letter glyph segmentation engine.
 
@@ -382,6 +383,7 @@ def create_per_letter_masks(text, target_w, target_h, font_path, font_size, thic
     Parameters:
         y_offsets: array of vertical offsets per character (in effective pixels)
         alphas: array of opacity values [0.0, 1.0] per character
+        aspect_ratio: vertical aspect ratio factor (overrides global ASPECT_RATIO_FACTOR)
     """
     w, h = target_w, target_h
 
@@ -394,7 +396,8 @@ def create_per_letter_masks(text, target_w, target_h, font_path, font_size, thic
     if alphas is None:
         alphas = [1.0] * n
 
-    effective_h = int(h * ASPECT_RATIO_FACTOR)
+    ar_factor = aspect_ratio if aspect_ratio is not None else ASPECT_RATIO_FACTOR
+    effective_h = int(h * ar_factor)
     if effective_h < 1:
         effective_h = 1
 
@@ -597,45 +600,45 @@ def get_ethereal_alphas(text, t, speed):
     return alphas
 
 
-def generate_frame(text, target_w, target_h, font_path, font_size, thickness, is_stroke, is_negative, is_anim, mode, speed):
+def generate_frame(text, target_w, target_h, font_path, font_size, thickness, is_stroke, is_negative, is_anim, mode, speed, aspect_ratio=None):
     """Generate a single frame mask based on the current animation mode."""
     curr_time = time.time()
     w, h = target_w, target_h
 
     if mode == "MOTION" and is_anim:
         x_off = get_motion_x(curr_time, w, speed)
-        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_off)
+        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_offset=x_off, aspect_ratio=aspect_ratio)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "SPIN_360" and is_anim:
         angle = get_spin_360_angle(curr_time, speed)
-        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, rotation=angle)
+        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, rotation=angle, aspect_ratio=aspect_ratio)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "PULSE" and is_anim:
         pulse_scale = get_pulse_scale(curr_time, font_size, speed)
-        mask = create_text_mask(text, target_w, target_h, font_path, pulse_scale, thickness, is_stroke)
+        mask = create_text_mask(text, target_w, target_h, font_path, pulse_scale, thickness, is_stroke, aspect_ratio=aspect_ratio)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "TYPEWRITER" and is_anim:
         display_text = get_typewriter_text(text, curr_time, speed)
-        mask = create_text_mask(display_text, target_w, target_h, font_path, font_size, thickness, is_stroke)
+        mask = create_text_mask(display_text, target_w, target_h, font_path, font_size, thickness, is_stroke, aspect_ratio=aspect_ratio)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "TYPO_WAVE" and is_anim:
         y_offsets = get_typo_wave_offsets(text, curr_time, speed)
         mask = create_per_letter_masks(text, target_w, target_h, font_path, font_size, thickness, is_stroke,
-                                       y_offsets=y_offsets)
+                                       y_offsets=y_offsets, aspect_ratio=aspect_ratio)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "ETHEREAL" and is_anim:
         alphas = get_ethereal_alphas(text, curr_time, speed)
         mask = create_per_letter_masks(text, target_w, target_h, font_path, font_size, thickness, is_stroke,
-                                       alphas=alphas)
+                                       alphas=alphas, aspect_ratio=aspect_ratio)
         intensity = 1.0 - mask if is_negative else mask
 
     else:
-        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke)
+        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, aspect_ratio=aspect_ratio)
         effective_mask = 1.0 - mask if is_negative else mask
 
         if mode == "SHARP_BLADE" and is_anim:
@@ -716,6 +719,8 @@ def build_parameters(mode_list, font_names, glyph_names):
         Parameter("Boldness", "gauge", value=4.0, min_val=1.0, max_val=20.0, step=1.0, fmt="{:.0f}"),
         Parameter("Speed", "gauge", value=1.0, min_val=0.1, max_val=5.0, step=0.1, fmt="{:.1f}"),
         Parameter("Colors", "gauge", value=10.0, min_val=1.0, max_val=10.0, step=1.0, fmt="{:.0f}"),
+        Parameter("Resolution", "gauge", value=1.0, min_val=0.25, max_val=2.0, step=0.1, fmt="{:.2f}x"),
+        Parameter("V. Aspect", "gauge", value=0.5, min_val=0.3, max_val=1.0, step=0.05, fmt="{:.2f}"),
     ]
     return params
 
@@ -762,16 +767,19 @@ def render_tui_panel(params, selected_idx, current_text, text_editing, panel_wid
     return "\n".join(lines)
 
 
-def render_frame_to_string(intensity, width, height, active_chars, brightness, contrast, num_colors):
+def render_frame_to_string(intensity, width, height, active_chars, brightness, contrast, num_colors, is_anim=True):
     """Convert intensity mask directly to ASCII art string (no resize needed).
-    Sub-pixel dither is refreshed every frame for subtle living texture."""
+    Sub-pixel dither is refreshed every frame for subtle living texture when animated."""
     # intensity is already at (height, width) — direct 1:1 mapping
     gray_norm = np.clip((intensity * contrast) + brightness, 0.0, 1.0)
 
     tiles_y, tiles_x = (height + 1) // 2, (width + 1) // 2
     dither_map = np.tile(bayer_matrix, (tiles_y, tiles_x))[:height, :width]
-    # Sub-pixel dither refresh: add per-frame micro-noise for living texture
-    frame_noise = np.random.uniform(-0.02, 0.02, (height, width))
+    # Sub-pixel dither refresh: only add per-frame micro-noise when animating
+    if is_anim:
+        frame_noise = np.random.uniform(-0.02, 0.02, (height, width))
+    else:
+        frame_noise = 0.0
     dithered = np.clip(gray_norm + (dither_map - 0.5) * 0.5 + frame_noise, 0, 0.999)
 
     ascii_indices = (dithered * len(active_chars)).astype(int)
@@ -836,6 +844,8 @@ def main():
             t_thick = int(next(p for p in params if p.name == "Boldness").value)
             speed = next(p for p in params if p.name == "Speed").value
             num_colors = int(next(p for p in params if p.name == "Colors").value)
+            resolution = next(p for p in params if p.name == "Resolution").value
+            aspect_ratio = next(p for p in params if p.name == "V. Aspect").value
 
             font_idx = font_names.index(font_val) if font_val in font_names else 0
             glyph_idx = glyph_names.index(glyph_val) if glyph_val in glyph_names else 0
@@ -843,19 +853,30 @@ def main():
             # Get the resolved font path for the selected font
             font_path = FONTS[font_idx][1]
 
-            # Generate frame (returns intensity mask at terminal resolution)
+            # Compute internal rendering resolution
+            render_w = max(1, int(args.width * resolution))
+            render_h = max(1, int(args.height * resolution))
+
+            # Generate frame (returns intensity mask at internal resolution)
             intensity = generate_frame(
-                current_text, args.width, args.height,
+                current_text, render_w, render_h,
                 font_path, t_size, t_thick,
-                is_stroke, is_negative, is_anim, mode_val, speed
+                is_stroke, is_negative, is_anim, mode_val, speed,
+                aspect_ratio=aspect_ratio
             )
+
+            # Resize intensity back to terminal dimensions if resolution != 1.0
+            if render_w != args.width or render_h != args.height:
+                intensity_img = Image.fromarray((intensity * 255).astype(np.uint8))
+                intensity_img = intensity_img.resize((args.width, args.height), resample=Image.BILINEAR)
+                intensity = np.array(intensity_img, dtype=np.float64) / 255.0
 
             # Build active charset
             base_chars = CHARSETS[glyph_names[glyph_idx]]
             active_chars = np.array(base_chars)[np.linspace(0, len(base_chars) - 1, min(MAX_GLYPH_SAMPLES, len(base_chars))).astype(int)]
 
             # Render ASCII art
-            ascii_output = render_frame_to_string(intensity, args.width, args.height, active_chars, brightness, contrast, num_colors)
+            ascii_output = render_frame_to_string(intensity, args.width, args.height, active_chars, brightness, contrast, num_colors, is_anim=is_anim)
 
             # Render TUI panel
             tui_panel = render_tui_panel(params, selected_idx, current_text, text_editing)
