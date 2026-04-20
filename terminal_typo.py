@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 import sys
 import time
 import os
@@ -26,13 +26,58 @@ CHARSETS = {
     "waves": list(" .~≈=")
 }
 
-FONTS = [
-    ("Simplex", cv2.FONT_HERSHEY_SIMPLEX),
-    ("Complex", cv2.FONT_HERSHEY_COMPLEX),
-    ("Triplex", cv2.FONT_HERSHEY_TRIPLEX),
-    ("Plain", cv2.FONT_HERSHEY_PLAIN),
-    ("Script", cv2.FONT_HERSHEY_SCRIPT_COMPLEX)
+# --- TRUETYPE FONT CONFIGURATION ---
+# List of (display_name, font_path) tuples. Paths are searched in order;
+# if none exist on the system, Pillow's built-in default font is used.
+FONT_SEARCH_PATHS = [
+    ("Sans Bold", [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+    ]),
+    ("Sans Regular", [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/lato/Lato-Regular.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]),
+    ("Serif Bold", [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+        "C:/Windows/Fonts/timesbd.ttf",
+    ]),
+    ("Mono Bold", [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+        "C:/Windows/Fonts/courbd.ttf",
+    ]),
+    ("Light", [
+        "/usr/share/fonts/truetype/lato/Lato-Light.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-ExtraLight.ttf",
+        "C:/Windows/Fonts/segoeuil.ttf",
+    ]),
 ]
+
+
+def _resolve_font_path(search_paths):
+    """Find the first existing font file from a list of candidate paths."""
+    for path in search_paths:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _build_font_list():
+    """Build the FONTS list: [(display_name, resolved_path_or_None), ...]"""
+    fonts = []
+    for name, paths in FONT_SEARCH_PATHS:
+        resolved = _resolve_font_path(paths)
+        fonts.append((name, resolved))
+    return fonts
+
+
+FONTS = _build_font_list()
 
 PALETTE = [
     "\033[34m", "\033[35m", "\033[31m", "\033[32m", "\033[36m",
@@ -49,24 +94,50 @@ bayer_matrix = np.array([[0, 2], [3, 1]]) / 4.0
 
 # --- INPUT HANDLING ---
 def get_key():
+    """Read a key press, properly handling multi-byte ANSI escape sequences."""
     if os.name == 'nt':
-        # (Keep your existing Windows logic)
-        ...
+        import msvcrt
+        if msvcrt.kbhit():
+            ch = msvcrt.getch()
+            if ch in (b'\x00', b'\xe0'):
+                ch2 = msvcrt.getch()
+                mapping = {b'H': 'UP', b'P': 'DOWN', b'M': 'RIGHT', b'K': 'LEFT'}
+                return mapping.get(ch2, None)
+            elif ch == b'\r':
+                return 'ENTER'
+            elif ch == b'\x08':
+                return 'BACKSPACE'
+            elif ch == b'\x1b':
+                return 'ESCAPE'
+            return ch.decode('utf-8', errors='ignore')
+        return None
     else:
-        if select.select([sys.stdin], [], [], 0)[0]:
+        # Use a longer timeout (0.02s) to ensure multi-byte ANSI escape
+        # sequences arrive fully before we try to read them.
+        if select.select([sys.stdin], [], [], 0.02)[0]:
             ch = sys.stdin.read(1)
             if ch == '\x1b':
-                # Try to read the next two characters immediately
-                # ANSI sequences for arrows are usually 3 chars: ESC + [ + (A, B, C, or D)
-                try:
-                    # Non-blocking read to grab the rest of the sequence
-                    seq = sys.stdin.read(2)
-                    mapping = {'[A': 'UP', '[B': 'DOWN', '[C': 'RIGHT', '[D': 'LEFT'}
+                # Drain the rest of the escape sequence with a short wait
+                # to ensure all bytes of the sequence are available.
+                if select.select([sys.stdin], [], [], 0.05)[0]:
+                    seq = ''
+                    while select.select([sys.stdin], [], [], 0.01)[0]:
+                        seq += sys.stdin.read(1)
+                        # Safety limit: longest expected sequence is 4 bytes
+                        # (e.g. "[5~" for PGUP), 8 covers any extended sequences.
+                        if len(seq) >= 8:
+                            break
+                    mapping = {
+                        '[A': 'UP', '[B': 'DOWN', '[C': 'RIGHT', '[D': 'LEFT',
+                        '[H': 'HOME', '[F': 'END',
+                        '[5~': 'PGUP', '[6~': 'PGDN',
+                    }
                     return mapping.get(seq, 'ESCAPE')
-                except:
-                    return 'ESCAPE'
+                return 'ESCAPE'
             elif ch == '\x7f':
                 return 'BACKSPACE'
+            elif ch == '\n' or ch == '\r':
+                return 'ENTER'
             return ch
         return None
 
@@ -198,73 +269,126 @@ def get_typewriter_text(text, t, speed):
         return text[:chars_shown] + cursor
 
 
-# --- MASK GENERATION ---
-def create_text_mask(text, target_w, target_h, font, scale, thickness, is_stroke, x_offset=0, rotation=0.0):
-    w, h = target_w * 10, target_h * 10
-    canvas = np.zeros((h, w), dtype=np.uint8)
+# --- MASK GENERATION (Pillow-based Point-to-Grid Engine) ---
+# Vertical compensation factor: terminal character cells are typically ~2x taller
+# than they are wide (e.g. a cell might be 8px wide × 16px tall). This factor
+# compresses the rendering canvas vertically before stretching it back to the full
+# terminal height, producing correctly proportioned text. Adjust if your terminal
+# uses a non-standard cell aspect ratio.
+ASPECT_RATIO_FACTOR = 0.5
+
+
+def _load_pil_font(font_path, size):
+    """Load a TrueType/OpenType font, falling back to default if unavailable."""
+    if font_path and os.path.isfile(font_path):
+        try:
+            return ImageFont.truetype(font_path, size)
+        except (IOError, OSError):
+            pass
+    # Fallback to Pillow's built-in default font
+    try:
+        return ImageFont.load_default(size)
+    except TypeError:
+        # Older Pillow versions don't accept size in load_default
+        return ImageFont.load_default()
+
+
+def create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_offset=0, rotation=0.0):
+    """
+    Render text directly at terminal resolution (1:1 pixel-to-character mapping).
+    Applies aspect ratio correction so text isn't vertically squashed.
+    """
+    # The canvas is exactly the terminal grid size
+    w, h = target_w, target_h
 
     if not text or not text.strip():
-        return canvas.astype(np.float64)
+        return np.zeros((h, w), dtype=np.float64)
 
-    size, _ = cv2.getTextSize(text, font, scale, thickness)
-    text_x = int((w - size[0]) // 2 + x_offset)
-    text_y = (h + size[1]) // 2
+    # Apply aspect ratio correction: the effective pixel height for rendering
+    # is reduced because terminal cells are taller than wide.
+    effective_h = int(h * ASPECT_RATIO_FACTOR)
+    if effective_h < 1:
+        effective_h = 1
+
+    # Create a Pillow image at (w, effective_h) for rendering
+    img = Image.new('L', (w, effective_h), 0)
+    draw = ImageDraw.Draw(img)
+
+    # Load the font at the requested size
+    pil_font = _load_pil_font(font_path, int(font_size))
+
+    # Measure text to center it
+    bbox = draw.textbbox((0, 0), text, font=pil_font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    # Center the text, applying x_offset
+    text_x = int((w - text_w) / 2 + x_offset - bbox[0])
+    text_y = int((effective_h - text_h) / 2 - bbox[1])
 
     if is_stroke:
-        outer = thickness + int(scale * 6) + 4
-        cv2.putText(canvas, text, (text_x, text_y), font, scale, 255, outer, cv2.LINE_AA)
-        cv2.putText(canvas, text, (text_x, text_y), font, scale, 0, thickness, cv2.LINE_AA)
+        # Draw stroke effect: thick outline, then erase interior.
+        # Factor 0.4 maps the TUI "Boldness" parameter to a visually balanced
+        # PIL stroke_width (keeps strokes visible but not overly thick).
+        stroke_width = max(1, int(thickness * 0.4))
+        draw.text((text_x, text_y), text, font=pil_font, fill=255,
+                  stroke_width=stroke_width, stroke_fill=255)
+        # Erase interior by drawing text again in black
+        draw.text((text_x, text_y), text, font=pil_font, fill=0)
     else:
-        cv2.putText(canvas, text, (text_x, text_y), font, scale, 255, thickness, cv2.LINE_AA)
+        draw.text((text_x, text_y), text, font=pil_font, fill=255)
 
     # Apply rotation if needed
     if abs(rotation) > 0.01:
-        center = (w // 2, h // 2)
-        rot_matrix = cv2.getRotationMatrix2D(center, rotation, 1.0)
-        canvas = cv2.warpAffine(canvas, rot_matrix, (w, h), flags=cv2.INTER_LINEAR)
+        img = img.rotate(rotation, resample=Image.BILINEAR, expand=False,
+                         center=(w // 2, effective_h // 2))
 
-    return canvas / 255.0
+    # Stretch vertically back to full terminal height (undo aspect ratio compression)
+    img = img.resize((w, h), resample=Image.BILINEAR)
+
+    # Convert to numpy float array normalized to [0, 1]
+    return np.array(img, dtype=np.float64) / 255.0
 
 
-def generate_frame(text, target_w, target_h, font, scale, thickness, is_stroke, is_negative, is_anim, mode, speed):
+def generate_frame(text, target_w, target_h, font_path, font_size, thickness, is_stroke, is_negative, is_anim, mode, speed):
+    """Generate a single frame mask based on the current animation mode."""
     curr_time = time.time()
-    w_px, h_px = target_w * 10, target_h * 10
+    w, h = target_w, target_h
 
     if mode == "MOTION" and is_anim:
-        x_off = get_motion_x(curr_time, w_px, speed)
-        mask = create_text_mask(text, target_w, target_h, font, scale, thickness, is_stroke, x_off)
+        x_off = get_motion_x(curr_time, w, speed)
+        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_off)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "ROTATE" and is_anim:
         angle = get_rotation_angle(curr_time, speed)
-        mask = create_text_mask(text, target_w, target_h, font, scale, thickness, is_stroke, rotation=angle)
+        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, rotation=angle)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "PULSE" and is_anim:
-        pulse_scale = get_pulse_scale(curr_time, scale, speed)
-        mask = create_text_mask(text, target_w, target_h, font, pulse_scale, thickness, is_stroke)
+        pulse_scale = get_pulse_scale(curr_time, font_size, speed)
+        mask = create_text_mask(text, target_w, target_h, font_path, pulse_scale, thickness, is_stroke)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "TYPEWRITER" and is_anim:
         display_text = get_typewriter_text(text, curr_time, speed)
-        mask = create_text_mask(display_text, target_w, target_h, font, scale, thickness, is_stroke)
+        mask = create_text_mask(display_text, target_w, target_h, font_path, font_size, thickness, is_stroke)
         intensity = 1.0 - mask if is_negative else mask
 
     else:
-        mask = create_text_mask(text, target_w, target_h, font, scale, thickness, is_stroke)
+        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke)
         effective_mask = 1.0 - mask if is_negative else mask
 
         if mode == "SHEEN" and is_anim:
             cycle = (curr_time * speed) % 2.0
-            sheen_center = (cycle - 0.5) * w_px
-            x_coords = np.arange(w_px)
-            sheen_1d = np.exp(-0.5 * ((x_coords - sheen_center) / (w_px * 0.2)) ** 2)
-            intensity = effective_mask * (0.4 + (np.tile(sheen_1d, (h_px, 1)) * 0.6))
+            sheen_center = (cycle - 0.5) * w
+            x_coords = np.arange(w)
+            sheen_1d = np.exp(-0.5 * ((x_coords - sheen_center) / (w * 0.2)) ** 2)
+            intensity = effective_mask * (0.4 + (np.tile(sheen_1d, (h, 1)) * 0.6))
         else:
             intensity = effective_mask
 
-    frame_8bit = (intensity * 255).astype(np.uint8)
-    return cv2.cvtColor(frame_8bit, cv2.COLOR_GRAY2BGR)
+    return intensity
 
 
 # --- TUI PARAMETER SYSTEM ---
@@ -382,11 +506,10 @@ def render_tui_panel(params, selected_idx, current_text, text_editing, panel_wid
     return "\n".join(lines)
 
 
-def render_frame_to_string(frame, width, height, active_chars, brightness, contrast, num_colors):
-    """Convert frame to ASCII art string."""
-    frame = cv2.resize(frame, (width, height))
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray_norm = np.clip(((gray / 255.0) * contrast) + brightness, 0.0, 1.0)
+def render_frame_to_string(intensity, width, height, active_chars, brightness, contrast, num_colors):
+    """Convert intensity mask directly to ASCII art string (no resize needed)."""
+    # intensity is already at (height, width) — direct 1:1 mapping
+    gray_norm = np.clip((intensity * contrast) + brightness, 0.0, 1.0)
 
     tiles_y, tiles_x = (height + 1) // 2, (width + 1) // 2
     dither_map = np.tile(bayer_matrix, (tiles_y, tiles_x))[:height, :width]
@@ -450,7 +573,7 @@ def main():
             is_negative = next(p for p in params if p.name == "Negative").value == "ON"
             brightness = next(p for p in params if p.name == "Brightness").value
             contrast = next(p for p in params if p.name == "Contrast").value
-            t_scale = next(p for p in params if p.name == "Font Size").value
+            t_size = next(p for p in params if p.name == "Font Size").value
             t_thick = int(next(p for p in params if p.name == "Boldness").value)
             speed = next(p for p in params if p.name == "Speed").value
             num_colors = int(next(p for p in params if p.name == "Colors").value)
@@ -458,10 +581,13 @@ def main():
             font_idx = font_names.index(font_val) if font_val in font_names else 0
             glyph_idx = glyph_names.index(glyph_val) if glyph_val in glyph_names else 0
 
-            # Generate frame
-            frame = generate_frame(
+            # Get the resolved font path for the selected font
+            font_path = FONTS[font_idx][1]
+
+            # Generate frame (returns intensity mask at terminal resolution)
+            intensity = generate_frame(
                 current_text, args.width, args.height,
-                FONTS[font_idx][1], t_scale, t_thick,
+                font_path, t_size, t_thick,
                 is_stroke, is_negative, is_anim, mode_val, speed
             )
 
@@ -470,7 +596,7 @@ def main():
             active_chars = np.array(base_chars)[np.linspace(0, len(base_chars) - 1, min(MAX_GLYPH_SAMPLES, len(base_chars))).astype(int)]
 
             # Render ASCII art
-            ascii_output = render_frame_to_string(frame, args.width, args.height, active_chars, brightness, contrast, num_colors)
+            ascii_output = render_frame_to_string(intensity, args.width, args.height, active_chars, brightness, contrast, num_colors)
 
             # Render TUI panel
             tui_panel = render_tui_panel(params, selected_idx, current_text, text_editing)
