@@ -114,33 +114,36 @@ def get_key():
             return ch.decode('utf-8', errors='ignore')
         return None
     else:
-        # Use a longer timeout (0.02s) to ensure multi-byte ANSI escape
-        # sequences arrive fully before we try to read them.
-        if select.select([sys.stdin], [], [], 0.02)[0]:
-            ch = sys.stdin.read(1)
-            if ch == '\x1b':
+        # Use os.read() on the raw file descriptor to bypass Python's
+        # internal buffering which can swallow multi-byte escape sequences
+        # (e.g. arrow keys send \x1b[A but BufferedReader consumes all
+        # bytes at once, making subsequent select() calls miss them).
+        fd = sys.stdin.fileno()
+        if select.select([fd], [], [], 0.02)[0]:
+            ch = os.read(fd, 1)
+            if ch == b'\x1b':
                 # Drain the rest of the escape sequence with a short wait
                 # to ensure all bytes of the sequence are available.
-                if select.select([sys.stdin], [], [], 0.05)[0]:
-                    seq = ''
-                    while select.select([sys.stdin], [], [], 0.01)[0]:
-                        seq += sys.stdin.read(1)
+                if select.select([fd], [], [], 0.05)[0]:
+                    seq = b''
+                    while select.select([fd], [], [], 0.01)[0]:
+                        seq += os.read(fd, 1)
                         # Safety limit: longest expected sequence is 4 bytes
                         # (e.g. "[5~" for PGUP), 8 covers any extended sequences.
                         if len(seq) >= 8:
                             break
                     mapping = {
-                        '[A': 'UP', '[B': 'DOWN', '[C': 'RIGHT', '[D': 'LEFT',
-                        '[H': 'HOME', '[F': 'END',
-                        '[5~': 'PGUP', '[6~': 'PGDN',
+                        b'[A': 'UP', b'[B': 'DOWN', b'[C': 'RIGHT', b'[D': 'LEFT',
+                        b'[H': 'HOME', b'[F': 'END',
+                        b'[5~': 'PGUP', b'[6~': 'PGDN',
                     }
                     return mapping.get(seq, 'ESCAPE')
                 return 'ESCAPE'
-            elif ch == '\x7f':
+            elif ch == b'\x7f':
                 return 'BACKSPACE'
-            elif ch == '\n' or ch == '\r':
+            elif ch == b'\n' or ch == b'\r':
                 return 'ENTER'
-            return ch
+            return ch.decode('utf-8', errors='ignore')
         return None
 
 # --- EASING CURVE LIBRARY ---
@@ -878,13 +881,13 @@ def main():
                         break
                     elif key == 'ESCAPE':
                         break
-                    elif key == 'UP':
+                    elif key == 'UP' or key == 'w':
                         selected_idx = (selected_idx - 1) % len(params)
-                    elif key == 'DOWN':
+                    elif key == 'DOWN' or key == 's':
                         selected_idx = (selected_idx + 1) % len(params)
-                    elif key == 'RIGHT':
+                    elif key == 'RIGHT' or key == 'd':
                         params[selected_idx].increment()
-                    elif key == 'LEFT':
+                    elif key == 'LEFT' or key == 'a':
                         params[selected_idx].decrement()
                     elif key == 'ENTER' or key == 't':
                         text_editing = True
