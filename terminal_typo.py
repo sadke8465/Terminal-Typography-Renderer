@@ -607,7 +607,7 @@ def generate_frame(text, target_w, target_h, font_path, font_size, thickness, is
 
     if mode == "MOTION" and is_anim:
         x_off = get_motion_x(curr_time, w, speed)
-        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_off, aspect_ratio=aspect_ratio)
+        mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_offset=x_off, aspect_ratio=aspect_ratio)
         intensity = 1.0 - mask if is_negative else mask
 
     elif mode == "SPIN_360" and is_anim:
@@ -867,9 +867,8 @@ def main():
 
             # Resize intensity back to terminal dimensions if resolution != 1.0
             if render_w != args.width or render_h != args.height:
-                from PIL import Image as _PILImage
-                intensity_img = _PILImage.fromarray((intensity * 255).astype(np.uint8))
-                intensity_img = intensity_img.resize((args.width, args.height), resample=_PILImage.BILINEAR)
+                intensity_img = Image.fromarray((intensity * 255).astype(np.uint8))
+                intensity_img = intensity_img.resize((args.width, args.height), resample=Image.BILINEAR)
                 intensity = np.array(intensity_img, dtype=np.float64) / 255.0
 
             # Build active charset
