@@ -20,7 +20,7 @@ CHARSETS = {
     "binary": list(" 01"),
     "hex": list(" 0123456789ABCDEF"),
     "braille": list(" ⡀⡄⡆⡇⣇⣧⣷⣿"),
-    "cyber": list(" ▖▚▜█"),
+
     "math": list(" -+<>=%&8B@"),
     "slashes": list(" \\/|X"),
     "waves": list(" .~≈=")
@@ -179,6 +179,37 @@ def ease_css(t):
     return t * t * (3.0 - 2.0 * t) * (1.0 + 0.5 * t * (1.0 - t))
 
 
+def ease_in_out_quintic(t):
+    """Quintic ease-in-out — strong acceleration/deceleration for Sharp Blade."""
+    if t < 0.5:
+        return 16.0 * t * t * t * t * t
+    else:
+        p = 2.0 * t - 2.0
+        return 0.5 * p * p * p * p * p + 1.0
+
+
+def ease_snap_to_settle(t):
+    """Snap-to-settle: fast for first 75% (270°), slow elegant settle for last 25% (90°)."""
+    if t < 0.75:
+        # Fast snap phase — use quintic ease-out for the first 270 degrees
+        local_t = t / 0.75
+        return (1.0 - pow(1.0 - local_t, 5)) * 0.75
+    else:
+        # Slow settle phase — gentle ease-out for the final 90 degrees
+        local_t = (t - 0.75) / 0.25
+        eased = local_t * local_t * (3.0 - 2.0 * local_t)
+        return 0.75 + eased * 0.25
+
+
+def ease_sqrt_sine(t):
+    """Square-root sine — longer hang time at the top of the bounce (weightless feel)."""
+    raw = math.sin(2.0 * math.pi * t)
+    if raw >= 0:
+        return math.sqrt(raw)
+    else:
+        return -math.sqrt(-raw)
+
+
 def cubic_bezier(t, p1, p2):
     """Simple cubic bezier easing (assuming p0=0 and p3=1)."""
     return 3 * (1 - t)**2 * t * p1 + 3 * (1 - t) * t**2 * p2 + t**3
@@ -203,21 +234,6 @@ def get_motion_x(t, w, speed):
         progress = (t_cycle - stay_end) / (1.0 - stay_end)
         eased = cubic_bezier(progress, 1.0, 0.2)
         return eased * w
-
-
-def get_rotation_angle(t, speed):
-    """Calculate rotation angle with ease-in-out-back for polished feel."""
-    cycle_duration = 4.0 / speed
-    t_cycle = (t % cycle_duration) / cycle_duration
-    # Pendulum swing: ease from 0 to 1 to 0 over the cycle
-    if t_cycle < 0.5:
-        progress = t_cycle * 2.0
-        eased = ease_in_out_back(progress)
-    else:
-        progress = (t_cycle - 0.5) * 2.0
-        eased = 1.0 - ease_in_out_back(progress)
-    # Map to ±30 degrees
-    return (eased - 0.5) * 60.0
 
 
 def get_pulse_scale(t, base_scale, speed):
@@ -350,6 +366,232 @@ def create_text_mask(text, target_w, target_h, font_path, font_size, thickness, 
     return np.array(img, dtype=np.float64) / 255.0
 
 
+def create_per_letter_masks(text, target_w, target_h, font_path, font_size, thickness, is_stroke,
+                            y_offsets=None, alphas=None):
+    """
+    Per-letter glyph segmentation engine.
+
+    Renders each character individually onto its own sub-buffer, then composites
+    into the main frame. Each glyph can have independent Y-offset and opacity.
+
+    Parameters:
+        y_offsets: array of vertical offsets per character (in effective pixels)
+        alphas: array of opacity values [0.0, 1.0] per character
+    """
+    w, h = target_w, target_h
+
+    if not text or not text.strip():
+        return np.zeros((h, w), dtype=np.float64)
+
+    n = len(text)
+    if y_offsets is None:
+        y_offsets = [0] * n
+    if alphas is None:
+        alphas = [1.0] * n
+
+    effective_h = int(h * ASPECT_RATIO_FACTOR)
+    if effective_h < 1:
+        effective_h = 1
+
+    pil_font = _load_pil_font(font_path, int(font_size))
+
+    # Measure each character's width for positioning
+    char_widths = []
+    for ch in text:
+        tmp_img = Image.new('L', (1, 1), 0)
+        tmp_draw = ImageDraw.Draw(tmp_img)
+        bbox = tmp_draw.textbbox((0, 0), ch, font=pil_font)
+        char_widths.append(bbox[2] - bbox[0])
+
+    total_text_width = sum(char_widths)
+
+    # Calculate starting x to center the text
+    start_x = (w - total_text_width) // 2
+
+    # Composite image
+    composite = Image.new('L', (w, effective_h), 0)
+
+    # Measure text height for vertical centering
+    tmp_img = Image.new('L', (1, 1), 0)
+    tmp_draw = ImageDraw.Draw(tmp_img)
+    full_bbox = tmp_draw.textbbox((0, 0), text, font=pil_font)
+    text_h = full_bbox[3] - full_bbox[1]
+    base_y = int((effective_h - text_h) / 2 - full_bbox[1])
+
+    current_x = start_x
+    for i, ch in enumerate(text):
+        if ch == ' ':
+            current_x += char_widths[i]
+            continue
+
+        # Create sub-buffer for this character
+        char_img = Image.new('L', (w, effective_h), 0)
+        char_draw = ImageDraw.Draw(char_img)
+
+        # Apply individual Y-offset
+        char_y = base_y + int(y_offsets[i])
+
+        # Get individual character bbox for precise positioning
+        ch_bbox = char_draw.textbbox((0, 0), ch, font=pil_font)
+
+        draw_x = current_x - ch_bbox[0]
+        draw_y = char_y
+
+        if is_stroke:
+            stroke_width = max(1, int(thickness * 0.4))
+            char_draw.text((draw_x, draw_y), ch, font=pil_font, fill=255,
+                           stroke_width=stroke_width, stroke_fill=255)
+            char_draw.text((draw_x, draw_y), ch, font=pil_font, fill=0)
+        else:
+            char_draw.text((draw_x, draw_y), ch, font=pil_font, fill=255)
+
+        # Apply alpha for this character
+        alpha = max(0.0, min(1.0, alphas[i]))
+        if alpha < 1.0:
+            char_arr = np.array(char_img, dtype=np.float64) * alpha
+            char_img = Image.fromarray(char_arr.astype(np.uint8))
+
+        # Composite onto main buffer
+        composite = Image.composite(char_img, composite, char_img)
+
+        current_x += char_widths[i]
+
+    # Stretch vertically back to full terminal height
+    composite = composite.resize((w, h), resample=Image.BILINEAR)
+
+    return np.array(composite, dtype=np.float64) / 255.0
+
+
+# --- NEW ANIMATION PRESETS ---
+
+def get_sharp_blade(t, w, h, speed):
+    """
+    Sharp Blade: A high-contrast linear 'knife' of light tilted at 20 degrees.
+    Uses a hard-edge step function with Ease-In-Out Quintic motion.
+    Returns an intensity modifier array of shape (h, w).
+    """
+    cycle_duration = 1.0 / speed
+    t_norm = (t % cycle_duration) / cycle_duration
+
+    # Rest phase at t=0.5 (text fully legible)
+    if 0.45 <= t_norm <= 0.55:
+        return np.ones((h, w), dtype=np.float64)
+
+    # Map t_norm to sweep progress with quintic easing
+    if t_norm < 0.45:
+        progress = ease_in_out_quintic(t_norm / 0.45)
+    else:
+        progress = ease_in_out_quintic((t_norm - 0.55) / 0.45)
+
+    # Blade position sweeps across the diagonal
+    blade_center = (progress - 0.5) * 2.0 * (w + h)
+
+    # 20-degree tilt: create coordinate grid
+    x_coords = np.arange(w, dtype=np.float64)
+    y_coords = np.arange(h, dtype=np.float64)
+    xx, yy = np.meshgrid(x_coords, y_coords)
+
+    # Project onto 20-degree tilted axis
+    angle_rad = math.radians(20.0)
+    projected = xx * math.cos(angle_rad) + yy * math.sin(angle_rad)
+
+    # Hard-edge step function (blade width ~8% of diagonal)
+    blade_width = (w + h) * 0.04
+    distance = np.abs(projected - blade_center)
+    blade = np.where(distance < blade_width, 1.0, 0.0)
+
+    # Final intensity: base 0.4 + blade highlight 0.6
+    return 0.4 + blade * 0.6
+
+
+def get_spin_360_angle(t, speed):
+    """
+    360 Spin: Full Z-axis rotation with snap-to-settle motion.
+    Fast 'snap' for first 270°, slow elegant 'settle' for final 90°.
+    Normalized 1.0s cycle with rest phase.
+    """
+    cycle_duration = 1.0 / speed
+    t_norm = (t % cycle_duration) / cycle_duration
+
+    # Rest phase: text is static and legible
+    if 0.45 <= t_norm <= 0.55:
+        return 0.0
+
+    # Active rotation phases
+    if t_norm < 0.45:
+        progress = t_norm / 0.45
+        eased = ease_snap_to_settle(progress)
+        return eased * 360.0
+    else:
+        progress = (t_norm - 0.55) / 0.45
+        eased = ease_snap_to_settle(progress)
+        return eased * 360.0
+
+
+def get_typo_wave_offsets(text, t, speed, amplitude=3.0):
+    """
+    Typographic Wave: Per-letter vertical bounce with phase-shifted sine.
+    Uses square-root sine for 'weightless' hang time at the top.
+    Returns array of Y-offsets per character.
+    """
+    n = len(text)
+    if n == 0:
+        return []
+
+    cycle_duration = 1.0 / speed
+    t_norm = (t % cycle_duration) / cycle_duration
+
+    offsets = []
+    for i in range(n):
+        # Phase offset per letter
+        phi_i = i / n
+        # Square-root sine for weightless feel at top
+        raw_phase = t_norm + phi_i
+        y_offset = amplitude * ease_sqrt_sine(raw_phase)
+        offsets.append(y_offset)
+
+    return offsets
+
+
+def get_ethereal_alphas(text, t, speed):
+    """
+    Ethereal Reveal: Per-letter dissolve with sequential delay.
+    Each letter fades in sequentially, holds, then dissolves out in the same wave.
+    Returns array of alpha values [0.0, 1.0] per character.
+    """
+    n = len(text)
+    if n == 0:
+        return []
+
+    cycle_duration = 1.0 / speed
+    t_norm = (t % cycle_duration) / cycle_duration
+
+    # Phase breakdown: fade-in (0.0-0.35), hold (0.35-0.65), fade-out (0.65-1.0)
+    alphas = []
+    delay_per_char = 0.5 / max(n, 1)  # stagger across half the phase
+
+    for i in range(n):
+        char_delay = i * delay_per_char
+
+        if t_norm < 0.35:
+            # Fade-in phase
+            local_t = t_norm / 0.35
+            char_progress = max(0.0, min(1.0, (local_t - char_delay) / (1.0 - char_delay + 0.001)))
+            alpha = char_progress
+        elif t_norm < 0.65:
+            # Hold phase — fully visible
+            alpha = 1.0
+        else:
+            # Fade-out phase
+            local_t = (t_norm - 0.65) / 0.35
+            char_progress = max(0.0, min(1.0, (local_t - char_delay) / (1.0 - char_delay + 0.001)))
+            alpha = 1.0 - char_progress
+
+        alphas.append(max(0.0, min(1.0, alpha)))
+
+    return alphas
+
+
 def generate_frame(text, target_w, target_h, font_path, font_size, thickness, is_stroke, is_negative, is_anim, mode, speed):
     """Generate a single frame mask based on the current animation mode."""
     curr_time = time.time()
@@ -360,8 +602,8 @@ def generate_frame(text, target_w, target_h, font_path, font_size, thickness, is
         mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, x_off)
         intensity = 1.0 - mask if is_negative else mask
 
-    elif mode == "ROTATE" and is_anim:
-        angle = get_rotation_angle(curr_time, speed)
+    elif mode == "SPIN_360" and is_anim:
+        angle = get_spin_360_angle(curr_time, speed)
         mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke, rotation=angle)
         intensity = 1.0 - mask if is_negative else mask
 
@@ -375,16 +617,25 @@ def generate_frame(text, target_w, target_h, font_path, font_size, thickness, is
         mask = create_text_mask(display_text, target_w, target_h, font_path, font_size, thickness, is_stroke)
         intensity = 1.0 - mask if is_negative else mask
 
+    elif mode == "TYPO_WAVE" and is_anim:
+        y_offsets = get_typo_wave_offsets(text, curr_time, speed)
+        mask = create_per_letter_masks(text, target_w, target_h, font_path, font_size, thickness, is_stroke,
+                                       y_offsets=y_offsets)
+        intensity = 1.0 - mask if is_negative else mask
+
+    elif mode == "ETHEREAL" and is_anim:
+        alphas = get_ethereal_alphas(text, curr_time, speed)
+        mask = create_per_letter_masks(text, target_w, target_h, font_path, font_size, thickness, is_stroke,
+                                       alphas=alphas)
+        intensity = 1.0 - mask if is_negative else mask
+
     else:
         mask = create_text_mask(text, target_w, target_h, font_path, font_size, thickness, is_stroke)
         effective_mask = 1.0 - mask if is_negative else mask
 
-        if mode == "SHEEN" and is_anim:
-            cycle = (curr_time * speed) % 2.0
-            sheen_center = (cycle - 0.5) * w
-            x_coords = np.arange(w)
-            sheen_1d = np.exp(-0.5 * ((x_coords - sheen_center) / (w * 0.2)) ** 2)
-            intensity = effective_mask * (0.4 + (np.tile(sheen_1d, (h, 1)) * 0.6))
+        if mode == "SHARP_BLADE" and is_anim:
+            blade_modifier = get_sharp_blade(curr_time, w, h, speed)
+            intensity = effective_mask * blade_modifier
         else:
             intensity = effective_mask
 
@@ -507,13 +758,16 @@ def render_tui_panel(params, selected_idx, current_text, text_editing, panel_wid
 
 
 def render_frame_to_string(intensity, width, height, active_chars, brightness, contrast, num_colors):
-    """Convert intensity mask directly to ASCII art string (no resize needed)."""
+    """Convert intensity mask directly to ASCII art string (no resize needed).
+    Sub-pixel dither is refreshed every frame for subtle living texture."""
     # intensity is already at (height, width) — direct 1:1 mapping
     gray_norm = np.clip((intensity * contrast) + brightness, 0.0, 1.0)
 
     tiles_y, tiles_x = (height + 1) // 2, (width + 1) // 2
     dither_map = np.tile(bayer_matrix, (tiles_y, tiles_x))[:height, :width]
-    dithered = np.clip(gray_norm + (dither_map - 0.5) * 0.5, 0, 0.999)
+    # Sub-pixel dither refresh: add per-frame micro-noise for living texture
+    frame_noise = np.random.uniform(-0.02, 0.02, (height, width))
+    dithered = np.clip(gray_norm + (dither_map - 0.5) * 0.5 + frame_noise, 0, 0.999)
 
     ascii_indices = (dithered * len(active_chars)).astype(int)
     color_indices = (dithered * num_colors).astype(int)
@@ -537,7 +791,7 @@ def main():
     args = parser.parse_args()
 
     # Mode list with new presets
-    mode_list = ["SHEEN", "MOTION", "ROTATE", "PULSE", "TYPEWRITER", "STATIC"]
+    mode_list = ["SHARP_BLADE", "MOTION", "SPIN_360", "PULSE", "TYPEWRITER", "TYPO_WAVE", "ETHEREAL", "STATIC"]
     font_names = [f[0] for f in FONTS]
     glyph_names = list(CHARSETS.keys())
 
